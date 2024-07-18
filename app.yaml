@@ -1,0 +1,8 @@
+runtime: nodejs20
+
+env_variables:
+  PUPPETEER_CACHE_DIR: "/workspace/.cache/puppeteer"
+
+handlers:
+  - url: /.*
+    script: auto

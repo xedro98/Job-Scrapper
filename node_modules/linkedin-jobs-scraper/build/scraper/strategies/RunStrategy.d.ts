@@ -1,0 +1,15 @@
+import { Browser, Page, CDPSession } from "puppeteer";
+import { Scraper } from "../Scraper";
+import { IQuery } from "../query";
+export interface IRunStrategyResult {
+    exit: boolean;
+}
+export declare abstract class RunStrategy {
+    protected scraper: Scraper;
+    constructor(scraper: Scraper);
+    abstract run(browser: Browser, page: Page, cdpSession: CDPSession, url: string, query: IQuery, location: string): Promise<IRunStrategyResult>;
+}
+export interface ILoadResult {
+    success: boolean;
+    error?: string | Error;
+}
