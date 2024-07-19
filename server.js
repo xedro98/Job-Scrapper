@@ -33,12 +33,18 @@ app.post('/scrape', async (req, res) => {
   scraper.on(events.scraper.data, (data) => {
     // Only push relevant job details
     results.push({
+      jobId: data.jobId,
       title: data.title,
       company: data.company,
+      companyLink: data.companyLink,
+      companyImgLink: data.companyImgLink,
       place: data.place,
       date: data.date,
       link: data.link,
-      description: data.description
+      applyLink: data.applyLink,
+      description: data.description,
+      descriptionHTML: data.descriptionHTML,
+      insights: data.insights
     });
   });
 
