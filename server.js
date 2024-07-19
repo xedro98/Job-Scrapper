@@ -24,7 +24,7 @@ app.post('/scrape', async (req, res) => {
 
   const scraper = new LinkedinScraper({
     headless: 'new',
-    slowMo: 500, // Increased slowMo value to reduce request rate
+    slowMo: 200, // Increased slowMo value to reduce request rate
     args: ["--lang=en-GB"],
   });
 
