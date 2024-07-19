@@ -1,10 +1,8 @@
 const express = require('express');
 const { LinkedinScraper, events, typeFilter } = require('linkedin-jobs-scraper');
-const puppeteer = require('puppeteer');
-const path = require('path');
 
 const app = express();
-const port = process.env.PORT || 3000; // Use the PORT environment variable
+const port = 3000;
 
 app.use(express.json());
 
@@ -24,62 +22,24 @@ const userAgents = [
 app.post('/scrape', async (req, res) => {
   const { query, locations, limit } = req.body;
 
-  const browser = await puppeteer.launch({
+  const scraper = new LinkedinScraper({
     headless: 'new',
     slowMo: 500, // Increased slowMo value to reduce request rate
-    args: [
-      '--enable-automation',
-      '--start-maximized',
-      '--window-size=1472,828',
-      '--lang=en-GB',
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-gpu',
-      '--disable-accelerated-2d-canvas',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      "--proxy-server='direct://",
-      '--allow-running-insecure-content',
-      '--disable-web-security',
-      '--disable-client-side-phishing-detection',
-      '--disable-notifications',
-      '--mute-audio',
-      '--lang=en-GB'
-    ],
-    executablePath: '/workspace/.cache/puppeteer/chrome/linux-126.0.6478.182/chrome-linux64/chrome',
-    cacheDirectory: '/workspace/.cache/puppeteer'
+    args: ["--lang=en-GB"],
   });
 
-  const scraper = new LinkedinScraper({
-    headless: true,
-    slowMo: 500, // Increased slowMo value to reduce request rate
-    args: [
-      '--enable-automation',
-      '--start-maximized',
-      '--window-size=1472,828',
-      '--lang=en-GB',
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-gpu',
-      '--disable-accelerated-2d-canvas',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      "--proxy-server='direct://",
-      '--allow-running-insecure-content',
-      '--disable-web-security',
-      '--disable-client-side-phishing-detection',
-      '--disable-notifications',
-      '--mute-audio',
-      '--lang=en-GB'
-    ],
-    executablePath: '/workspace/.cache/puppeteer/chrome/linux-126.0.6478.182/chrome-linux64/chrome',
-    cacheDirectory: '/workspace/.cache/puppeteer'
-  });
+  let results = [];
 
   scraper.on(events.scraper.data, (data) => {
-    console.log(data);
+    // Only push relevant job details
+    results.push({
+      title: data.title,
+      company: data.company,
+      place: data.place,
+      date: data.date,
+      link: data.link,
+      description: data.description
+    });
   });
 
   scraper.on(events.scraper.error, (err) => {
@@ -110,7 +70,6 @@ app.post('/scrape', async (req, res) => {
     });
 
     await scraper.close();
-    await browser.close();
     
     // Send a nicely formatted JSON response
     res.setHeader('Content-Type', 'application/json');

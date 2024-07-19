@@ -7,9 +7,5 @@
     "ioredis": "^5.4.1",
     "linkedin-jobs-scraper": "^17.0.1",
     "puppeteer": "^22.13.1"
-  },
-  "scripts": {
-    "start": "node server.js",
-    "postinstall": "npx puppeteer install"
   }
 }
