@@ -1,0 +1,34 @@
+# Node.js dependencies
+node_modules/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Environment variables
+.env
+
+# Google Cloud specific files
+.gcloudignore
+
+# Miscellaneous
+.DS_Store
+
+# Build directory
+dist/
+build/
+
+# Temporary files
+tmp/
+temp/
+
+# IDE specific files
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
