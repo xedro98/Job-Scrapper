@@ -161,7 +161,7 @@ app.post('/scrape', async (req, res) => {
 
     try {
       const mappedFilters = {
-        relevance: Math.random() < 0.5 ? relevanceFilter.RELEVANT : relevanceFilter.RECENT,
+        relevance: relevanceFilter.RELEVANT,
         time: timeFilter.ANY,
         type: filters.type,
         experience: filters.experience,
