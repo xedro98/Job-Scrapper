@@ -169,6 +169,9 @@ app.post('/scrape', async (req, res) => {
 
       while (containerRetries < maxContainerRetries) {
         try {
+          // Add a delay before starting the scraping process
+          await sleep(5000);
+
           await scraper.run([{
             query,
             options: {
