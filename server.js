@@ -39,7 +39,6 @@ async function fetchApplyLink(jobData, retries = 3, delay = 2000) {
       const response = await axiosInstance.get(jobData.link);
       const $ = cheerio.load(response.data);
       
-      // Look for the hidden apply URL in the code element
       const applyUrlCode = $('code#applyUrl');
       if (applyUrlCode.length > 0) {
         const applyUrlContent = applyUrlCode.html();
@@ -51,7 +50,6 @@ async function fetchApplyLink(jobData, retries = 3, delay = 2000) {
         }
       }
       
-      // If not found in the code element, try alternative methods
       const applyButton = $('a[data-tracking-control-name="public_jobs_apply-link-offsite"]');
       if (applyButton.length > 0) {
         return extractExternalUrl(applyButton.attr('href'));
@@ -114,7 +112,6 @@ app.post('/scrape', async (req, res) => {
     const fetchedJobIds = new Set(existingJobIds);
     let jobCount = 0;
 
-    // Calculate the increased limit for scraping
     const scrapingLimit = Math.min(Math.floor(limit * 1.8), Math.floor(limit) + 50);
 
     scraper.on(events.scraper.data, async (data) => {
@@ -150,7 +147,7 @@ app.post('/scrape', async (req, res) => {
     });
 
     scraper.on(events.scraper.end, () => {
-      console.log('Scraping completed');
+      console.log('Scraping attempt completed');
     });
 
     try {
@@ -164,7 +161,6 @@ app.post('/scrape', async (req, res) => {
 
       console.log('Running scraper with options:', { query, locations, filters: mappedFilters, limit: scrapingLimit });
 
-      // Add a delay before starting the scraping process
       await sleep(5000);
 
       await scraper.run([{
@@ -185,7 +181,6 @@ app.post('/scrape', async (req, res) => {
 
       results.sort((a, b) => new Date(b.date) - new Date(a.date));
 
-      // Fetch apply links in parallel
       const applyLinkPromises = results.map(job => fetchApplyLink(job));
       const applyLinks = await Promise.all(applyLinkPromises);
 
@@ -193,7 +188,6 @@ app.post('/scrape', async (req, res) => {
         job.applyLink = applyLinks[index] || "";
       });
 
-      // Trim results to the original limit
       return results.slice(0, Math.floor(limit));
     } catch (error) {
       console.error('Error during scraping:', error);
@@ -205,14 +199,15 @@ app.post('/scrape', async (req, res) => {
   const attemptScrape = async () => {
     try {
       const results = await runScraper();
-      res.json(results);
+      if (results.length > 0) {
+        console.log('Scraping completed successfully');
+        res.json(results);
+      } else {
+        throw new Error('No results found');
+      }
     } catch (error) {
-      if (error.message.includes("Failed to load container selector") && currentRetry < maxRetries) {
-        currentRetry++;
-        console.log(`Failed to load container selector. Retrying scrape attempt ${currentRetry} of ${maxRetries}`);
-        await sleep(5000 * currentRetry); // Exponential backoff
-        await attemptScrape();
-      } else if (currentRetry < maxRetries) {
+      console.error('Error during scraping:', error);
+      if (currentRetry < maxRetries) {
         currentRetry++;
         console.log(`Retrying scrape attempt ${currentRetry} of ${maxRetries}`);
         await sleep(5000 * currentRetry);
