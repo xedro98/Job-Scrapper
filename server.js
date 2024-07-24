@@ -164,19 +164,39 @@ app.post('/scrape', async (req, res) => {
 
       console.log('Running scraper with options:', { query, locations, filters: mappedFilters, limit: scrapingLimit });
 
-      await scraper.run([{
-        query,
-        options: {
-          locations,
-          filters: mappedFilters,
-          optimize: true,
-          limit: scrapingLimit,
-        },
-      }], {
-        paginationMax: 5,
-        delay: () => Math.floor(Math.random() * 1000) + 500,
-        userAgent: () => userAgents[Math.floor(Math.random() * userAgents.length)],
-      });
+      const maxContainerRetries = 5;
+      let containerRetries = 0;
+
+      while (containerRetries < maxContainerRetries) {
+        try {
+          await scraper.run([{
+            query,
+            options: {
+              locations,
+              filters: mappedFilters,
+              optimize: true,
+              limit: scrapingLimit,
+            },
+          }], {
+            paginationMax: 5,
+            delay: () => Math.floor(Math.random() * 1000) + 500,
+            userAgent: () => userAgents[Math.floor(Math.random() * userAgents.length)],
+          });
+          break; // If successful, exit the retry loop
+        } catch (error) {
+          if (error.message.includes("Failed to load container selector")) {
+            console.log(`Failed to load container selector, retrying... (Attempt ${containerRetries + 1}/${maxContainerRetries})`);
+            containerRetries++;
+            await sleep(5000 * containerRetries); // Exponential backoff
+          } else {
+            throw error; // If it's a different error, throw it
+          }
+        }
+      }
+
+      if (containerRetries === maxContainerRetries) {
+        console.error("Max retries reached for loading container selector");
+      }
 
       await scraper.close();
 
