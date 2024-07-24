@@ -100,6 +100,8 @@ app.post('/scrape', async (req, res) => {
 
   const maxRetries = 6;
   let currentRetry = 0;
+  let results = [];
+  let responsesSent = false;
 
   const runScraper = async () => {
     await sleep(5000); // Wait for 5 seconds before starting the scraper
@@ -110,14 +112,11 @@ app.post('/scrape', async (req, res) => {
       args: ["--lang=en-GB", "--no-sandbox", "--disable-setuid-sandbox"],
     });
 
-    const results = [];
     const fetchedJobIds = new Set(existingJobIds);
     let jobCount = 0;
 
-    const scrapingLimit = Math.min(Math.floor(limit * 1.8), Math.floor(limit) + 50);
-
     scraper.on(events.scraper.data, async (data) => {
-      if (jobCount >= scrapingLimit) return;
+      if (responsesSent || jobCount >= limit) return;
       if (fetchedJobIds.has(data.jobId)) return;
 
       jobCount++;
@@ -142,14 +141,22 @@ app.post('/scrape', async (req, res) => {
       results.push(jobData);
 
       console.log(`Job ID: ${data.jobId}, Title: ${data.title}`);
+
+      if (results.length >= limit) {
+        await scraper.close();
+        await sendResponse();
+      }
     });
 
     scraper.on(events.scraper.error, (err) => {
       console.error('Scraper error:', err);
     });
 
-    scraper.on(events.scraper.end, () => {
+    scraper.on(events.scraper.end, async () => {
       console.log('Scraping attempt completed');
+      if (!responsesSent) {
+        await sendResponse();
+      }
     });
 
     try {
@@ -161,7 +168,7 @@ app.post('/scrape', async (req, res) => {
         onSiteOrRemote: filters.onSiteOrRemote ? filters.onSiteOrRemote.map(o => onSiteOrRemoteFilter[o]) : undefined,
       };
 
-      console.log('Running scraper with options:', { query, locations, filters: mappedFilters, limit: scrapingLimit });
+      console.log('Running scraper with options:', { query, locations, filters: mappedFilters, limit });
 
       await sleep(5000);
 
@@ -171,7 +178,7 @@ app.post('/scrape', async (req, res) => {
           locations,
           filters: mappedFilters,
           optimize: true,
-          limit: scrapingLimit,
+          limit: limit * 2, // Set a higher limit to ensure we get enough results
         },
       }], {
         paginationMax: 5,
@@ -181,16 +188,9 @@ app.post('/scrape', async (req, res) => {
 
       await scraper.close();
 
-      results.sort((a, b) => new Date(b.date) - new Date(a.date));
-
-      const applyLinkPromises = results.map(job => fetchApplyLink(job));
-      const applyLinks = await Promise.all(applyLinkPromises);
-
-      results.forEach((job, index) => {
-        job.applyLink = applyLinks[index] || "";
-      });
-
-      return results.slice(0, Math.floor(limit));
+      if (!responsesSent) {
+        await sendResponse();
+      }
     } catch (error) {
       console.error('Error during scraping:', error);
       await scraper.close();
@@ -198,24 +198,36 @@ app.post('/scrape', async (req, res) => {
     }
   };
 
+  const sendResponse = async () => {
+    if (responsesSent) return;
+    responsesSent = true;
+
+    results.sort((a, b) => new Date(b.date) - new Date(a.date));
+    results = results.slice(0, limit);
+
+    const applyLinkPromises = results.map(job => fetchApplyLink(job));
+    const applyLinks = await Promise.all(applyLinkPromises);
+
+    results.forEach((job, index) => {
+      job.applyLink = applyLinks[index] || "";
+    });
+
+    console.log('Scraping completed successfully');
+    res.json(results);
+  };
+
   const attemptScrape = async () => {
     try {
-      const results = await runScraper();
-      if (results.length > 0) {
-        console.log('Scraping completed successfully');
-        res.json(results);
-      } else {
-        throw new Error('No results found');
-      }
+      await runScraper();
     } catch (error) {
       console.error('Error during scraping:', error);
-      if (currentRetry < maxRetries) {
+      if (currentRetry < maxRetries && !responsesSent) {
         currentRetry++;
         console.log(`Retrying scrape attempt ${currentRetry} of ${maxRetries}`);
         await sleep(5000 * currentRetry);
         await attemptScrape();
-      } else {
-        console.error('Max retries reached. Sending error response.');
+      } else if (!responsesSent) {
+        console.error('Max retries reached or error after response sent. Sending error response.');
         res.status(500).json({ error: 'Failed to scrape after multiple attempts' });
       }
     }
