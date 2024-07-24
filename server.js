@@ -98,13 +98,15 @@ app.post('/scrape', async (req, res) => {
 
   console.log('Received API request:', { query, locations, limit, filters, existingJobIds: existingJobIds.length });
 
-  const maxRetries = 5;
+  const maxRetries = 6;
   let currentRetry = 0;
 
   const runScraper = async () => {
+    await sleep(5000); // Wait for 5 seconds before starting the scraper
+
     const scraper = new LinkedinScraper({
       headless: true,
-      slowMo: 200,
+      slowMo: 300,
       args: ["--lang=en-GB", "--no-sandbox", "--disable-setuid-sandbox"],
     });
 
