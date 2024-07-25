@@ -10,6 +10,7 @@
     "linkedin-jobs-scraper": "^17.0.1",
     "puppeteer": "^22.13.1",
     "puppeteer-extra": "^3.3.6",
-    "puppeteer-extra-plugin-stealth": "^2.11.2"
+    "puppeteer-extra-plugin-stealth": "^2.11.2",
+    "node-cache": "^5.1.2" 
   }
 }
