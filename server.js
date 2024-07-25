@@ -43,11 +43,11 @@ if (cluster.isMaster) {
   const app = express();
   const port = process.env.PORT || 3000;
 
-  // Hardcoded Redis configuration
+  // Redis client setup
   const redisClient = new Redis({
-    host: 'redis-15623.c326.us-east-1-3.ec2.cloud.redns.com',
-    port: 15623,
-    password: 'ro5b7WjPEwm2voU95vWz6T8pZPyRlErf',
+    host: process.env.REDIS_HOST || 'redis-15623.c326.us-east-1-3.ec2.redns.redis-cloud.com',
+    port: process.env.REDIS_PORT || 15623,
+    password: process.env.REDIS_PASSWORD || 'ro5b7WjPEwm2voU95vWz6T8pZPyRlErf',
   });
 
   redisClient.on('error', (err) => console.log('Redis Client Error', err));
@@ -172,55 +172,45 @@ if (cluster.isMaster) {
     return linkedInUrl;
   }
 
-  const MAX_RETRIES = 10;
-  const MAX_RETRY_TIME = 5 * 60 * 1000; // 5 minutes in milliseconds
-  const RETRY_DELAY = 10000; // 10 seconds
+  app.post('/scrape', async (req, res) => {
+    const { query, locations, limit, options, existingJobIds } = req.body;
+    const filters = options.filters;
 
-  async function runScraperWithRetry(query, locations, filters, limit, existingJobIds) {
-    const startTime = Date.now();
-    let retryCount = 0;
-    let results = [];
+    logger.info('Received API request:', { query, locations, limit, filters, existingJobIds: existingJobIds.length });
 
-    while (retryCount < MAX_RETRIES && (Date.now() - startTime) < MAX_RETRY_TIME) {
-      try {
-        results = await runScraper(query, locations, filters, limit, existingJobIds);
-        
-        if (results.length > 0) {
-          return results; // Successful scrape with results
-        }
-        
-        logger.warn('Scraper completed but no results were found. Retrying...');
-      } catch (error) {
-        if (error.message && error.message.includes('Failed to load container selector')) {
-          logger.warn('Failed to load container selector. Retrying...');
-        } else {
-          logger.error('Unexpected error during scraping:', error);
-        }
+    // Generate cache key
+    const cacheKey = `${query}-${locations.join(',')}-${limit}-${JSON.stringify(filters)}-${existingJobIds.join(',')}`;
+
+    // Check Redis cache
+    try {
+      const cachedResults = await redisClient.get(cacheKey);
+      if (cachedResults) {
+        logger.info('Returning cached results from Redis');
+        return res.json(JSON.parse(cachedResults));
       }
-
-      retryCount++;
-      await sleep(RETRY_DELAY);
+    } catch (error) {
+      logger.error('Redis error:', error);
     }
 
-    throw new Error('Max retries or time exceeded without successful results');
-  }
-
-  async function runScraper(query, locations, filters, limit, existingJobIds) {
-    await sleep(5000); // Wait for 5 seconds before starting the scraper
-
-    const scraper = new LinkedinScraper({
-      headless: true,
-      slowMo: 200,
-      args: ["--lang=en-GB", "--no-sandbox", "--disable-setuid-sandbox"],
-    });
-
-    const fetchedJobIds = new Set(existingJobIds);
-    let jobCount = 0;
+    const maxRetries = 6;
+    let currentRetry = 0;
     let results = [];
+    let responsesSent = false;
 
-    return new Promise((resolve, reject) => {
+    const runScraper = async () => {
+      await sleep(5000); // Wait for 5 seconds before starting the scraper
+
+      const scraper = new LinkedinScraper({
+        headless: true,
+        slowMo: 200,
+        args: ["--lang=en-GB", "--no-sandbox", "--disable-setuid-sandbox"],
+      });
+
+      const fetchedJobIds = new Set(existingJobIds);
+      let jobCount = 0;
+
       scraper.on(events.scraper.data, async (data) => {
-        if (jobCount >= limit) return;
+        if (responsesSent || jobCount >= limit) return;
         if (fetchedJobIds.has(data.jobId)) return;
 
         jobCount++;
@@ -248,76 +238,82 @@ if (cluster.isMaster) {
 
         if (results.length >= limit) {
           await scraper.close();
-          resolve(results);
+          await sendResponse();
         }
       });
 
       scraper.on(events.scraper.error, (err) => {
         logger.error('Scraper error:', err);
-        reject(err);
       });
 
       scraper.on(events.scraper.end, async () => {
         logger.info('Scraping attempt completed');
-        resolve(results);
+        if (!responsesSent) {
+          if (results.length === 0) {
+            logger.info('No results found. Retrying...');
+            await scraper.close();
+            await attemptScrape();
+          } else {
+            await sendResponse();
+          }
+        }
       });
 
-      const mappedFilters = {
-        relevance: relevanceFilter.RELEVANT,
-        time: timeFilter.ANY,
-        type: filters.type,
-        experience: filters.experience,
-        onSiteOrRemote: filters.onSiteOrRemote ? filters.onSiteOrRemote.map(o => onSiteOrRemoteFilter[o]) : undefined,
-      };
+      try {
+        const mappedFilters = {
+          relevance: relevanceFilter.RELEVANT,
+          time: timeFilter.ANY,
+          type: filters.type,
+          experience: filters.experience,
+          onSiteOrRemote: filters.onSiteOrRemote ? filters.onSiteOrRemote.map(o => onSiteOrRemoteFilter[o]) : undefined,
+        };
 
-      logger.info('Running scraper with options:', { query, locations, filters: mappedFilters, limit });
+        logger.info('Running scraper with options:', { query, locations, filters: mappedFilters, limit });
 
-      scraper.run([{
-        query,
-        options: {
-          locations,
-          filters: mappedFilters,
-          optimize: true,
-          limit: limit * 2, // Set a higher limit to ensure we get enough results
-        },
-      }], {
-        paginationMax: 5,
-        delay: () => Math.floor(Math.random() * 1000) + 500,
-        userAgent: () => userAgents[Math.floor(Math.random() * userAgents.length)],
-      }).catch(reject);
-    });
-  }
+        await sleep(5000);
 
-  app.post('/scrape', async (req, res) => {
-    const { query, locations, limit, options, existingJobIds } = req.body;
-    const filters = options.filters;
+        await scraper.run([{
+          query,
+          options: {
+            locations,
+            filters: mappedFilters,
+            optimize: true,
+            limit: limit * 2, // Set a higher limit to ensure we get enough results
+          },
+        }], {
+          paginationMax: 5,
+          delay: () => Math.floor(Math.random() * 1000) + 500,
+          userAgent: () => userAgents[Math.floor(Math.random() * userAgents.length)],
+        });
 
-    logger.info('Received API request:', { query, locations, limit, filters, existingJobIds: existingJobIds.length });
-
-    // Generate cache key
-    const cacheKey = `${query}-${locations.join(',')}-${limit}-${JSON.stringify(filters)}-${existingJobIds.join(',')}`;
-
-    // Check Redis cache
-    try {
-      const cachedResults = await redisClient.get(cacheKey);
-      if (cachedResults) {
-        logger.info('Returning cached results from Redis');
-        return res.json(JSON.parse(cachedResults));
+        if (results.length === 0) {
+          logger.info('No results found after scraping. Retrying...');
+          await scraper.close();
+          await attemptScrape();
+        } else {
+          await scraper.close();
+          if (!responsesSent) {
+            await sendResponse();
+          }
+        }
+      } catch (error) {
+        logger.error('Error during scraping:', error);
+        await scraper.close();
+        throw error;
       }
-    } catch (error) {
-      logger.error('Redis error:', error);
-    }
+    };
 
-    try {
-      const results = await runScraperWithRetry(query, locations, filters, limit, existingJobIds);
+    const sendResponse = async () => {
+      if (responsesSent) return;
+      responsesSent = true;
 
       results.sort((a, b) => new Date(b.date) - new Date(a.date));
-      const limitedResults = results.slice(0, limit);
+      results = results.slice(0, limit);
 
-      const applyLinkPromises = limitedResults.map(job => fetchApplyLink(job));
+      const applyLinkPromises = results.map(job => fetchApplyLink(job));
       const applyLinks = await Promise.all(applyLinkPromises);
 
-      limitedResults.forEach((job, index) => {
+      results.forEach((job, index) => {
         job.applyLink = applyLinks[index] || "";
       });
 
@@ -325,16 +321,32 @@ if (cluster.isMaster) {
 
       // Cache the results in Redis
       try {
-        await redisClient.set(cacheKey, JSON.stringify(limitedResults), 'EX', 3600); // 1 hour expiration
+        await redisClient.set(cacheKey, JSON.stringify(results), 'EX', 3600); // 1 hour expiration
       } catch (error) {
         logger.error('Redis caching error:', error);
       }
 
-      res.json(limitedResults);
-    } catch (error) {
-      logger.error('Scraping failed after multiple retries:', error);
-      res.status(500).json({ error: 'Failed to scrape after multiple attempts' });
-    }
+      res.json(results);
+    };
+
+    const attemptScrape = async () => {
+      try {
+        await runScraper();
+      } catch (error) {
+        logger.error('Error during scraping:', error);
+        if (currentRetry < maxRetries && !responsesSent) {
+          currentRetry++;
+          logger.info(`Retrying scrape attempt ${currentRetry} of ${maxRetries}`);
+          await sleep(5000 * currentRetry);
+          await attemptScrape();
+        } else if (!responsesSent) {
+          logger.error('Max retries reached or error after response sent. Sending error response.');
+          res.status(500).json({ error: 'Failed to scrape after multiple attempts' });
+        }
+      }
+    };
+
+    attemptScrape();
   });
 
   // Health check endpoint
