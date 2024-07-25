@@ -249,13 +249,7 @@ if (cluster.isMaster) {
       scraper.on(events.scraper.end, async () => {
         logger.info('Scraping attempt completed');
         if (!responsesSent) {
-          if (results.length === 0) {
-            logger.info('No results found. Retrying...');
-            await scraper.close();
-            await attemptScrape();
-          } else {
-            await sendResponse();
-          }
+          await sendResponse();
         }
       });
 
@@ -286,15 +280,10 @@ if (cluster.isMaster) {
           userAgent: () => userAgents[Math.floor(Math.random() * userAgents.length)],
         });
 
-        if (results.length === 0) {
-          logger.info('No results found after scraping. Retrying...');
-          await scraper.close();
-          await attemptScrape();
-        } else {
-          await scraper.close();
-          if (!responsesSent) {
-            await sendResponse();
-          }
+        await scraper.close();
+
+        if (!responsesSent) {
+          await sendResponse();
         }
       } catch (error) {
         logger.error('Error during scraping:', error);
@@ -304,7 +293,7 @@ if (cluster.isMaster) {
     };
 
     const sendResponse = async () => {
-      if (responsesSent) return; 
+      if (responsesSent) return;
       responsesSent = true;
 
       results.sort((a, b) => new Date(b.date) - new Date(a.date));
