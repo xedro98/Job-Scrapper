@@ -202,7 +202,7 @@ if (cluster.isMaster) {
 
       const scraper = new LinkedinScraper({
         headless: true,
-        slowMo: 300,
+        slowMo: 200,
         args: ["--lang=en-GB", "--no-sandbox", "--disable-setuid-sandbox"],
       });
 
