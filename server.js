@@ -304,7 +304,7 @@ if (cluster.isMaster) {
     };
 
     const sendResponse = async () => {
-      if (responsesSent) return;
+      if (responsesSent) return; 
       responsesSent = true;
 
       results.sort((a, b) => new Date(b.date) - new Date(a.date));
