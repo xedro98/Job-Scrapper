@@ -21,12 +21,12 @@ const winston = require('winston');
 const expressWinston = require('express-winston');
 const cluster = require('cluster');
 const os = require('os');
+const genericPool = require('generic-pool');
+const Bull = require('bull');
 
-// Check if this is the master process
 if (cluster.isMaster) {
   console.log(`Master ${process.pid} is running`);
 
-  // Fork workers
   const numCPUs = os.cpus().length;
   for (let i = 0; i < numCPUs; i++) {
     cluster.fork();
@@ -34,12 +34,9 @@ if (cluster.isMaster) {
 
   cluster.on('exit', (worker, code, signal) => {
     console.log(`Worker ${worker.process.pid} died`);
-    // Replace the dead worker
     cluster.fork();
   });
 } else {
-  // This is a worker process
-
   const app = express();
   const port = process.env.PORT || 3000;
 
@@ -83,16 +80,16 @@ if (cluster.isMaster) {
   }));
 
   // Initialize cache
-  const cache = new NodeCache({ stdTTL: 3600 }); // Cache for 1 hour
+  const cache = new NodeCache({ stdTTL: 3600 });
 
   app.use(express.json());
-  app.use(compression()); // Add compression middleware
-  app.use(helmet()); // Add Helmet middleware for security headers
+  app.use(compression());
+  app.use(helmet());
 
   // Rate limiting
   const limiter = rateLimit({
-    windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 100, // Limit each IP to 100 requests per windowMs
+    windowMs: 15 * 60 * 1000,
+    max: 100,
     standardHeaders: true,
     legacyHeaders: false,
   });
@@ -110,6 +107,33 @@ if (cluster.isMaster) {
     timeout: 10000,
     headers: {
       'User-Agent': userAgents[Math.floor(Math.random() * userAgents.length)]
+    }
+  });
+
+  // Create a pool of LinkedIn scrapers
+  const scraperPool = genericPool.createPool({
+    create: async () => {
+      const scraper = new LinkedinScraper({
+        headless: true,
+        slowMo: 200,
+        args: ["--lang=en-GB", "--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
+      });
+      return scraper;
+    },
+    destroy: async (scraper) => {
+      await scraper.close();
+    }
+  }, {
+    max: 5,
+    min: 2
+  });
+
+  // Create a Bull queue for scraping jobs
+  const scrapeQueue = new Bull('scrape-jobs', {
+    redis: {
+      host: process.env.REDIS_HOST,
+      port: process.env.REDIS_PORT,
+      password: process.env.REDIS_PASSWORD,
     }
   });
 
@@ -145,7 +169,7 @@ if (cluster.isMaster) {
         if (error.response && error.response.status === 429) {
           logger.warn(`Rate limited on attempt ${attempt + 1} for ${jobData.link}. Retrying in ${delay / 1000} seconds...`);
           await sleep(delay);
-          delay *= 2; // Exponential backoff
+          delay *= 2;
         } else {
           logger.error(`Error fetching apply link for ${jobData.link}:`, error.message);
           return null;
@@ -172,200 +196,133 @@ if (cluster.isMaster) {
     return linkedInUrl;
   }
 
+  async function runScraper(scraper, query, locations, limit, filters, existingJobIds) {
+    return new Promise((resolve, reject) => {
+      const results = [];
+      const fetchedJobIds = new Set(existingJobIds);
+      let jobCount = 0;
+
+      scraper.on(events.scraper.data, (data) => {
+        if (jobCount >= limit || fetchedJobIds.has(data.jobId)) return;
+        jobCount++;
+        fetchedJobIds.add(data.jobId);
+        results.push(data);
+      });
+
+      scraper.on(events.scraper.error, (err) => {
+        reject(err);
+      });
+
+      scraper.on(events.scraper.end, () => {
+        resolve(results);
+      });
+
+      const mappedFilters = {
+        relevance: relevanceFilter.RELEVANT,
+        time: timeFilter.ANY,
+        type: filters.type,
+        experience: filters.experience,
+        onSiteOrRemote: filters.onSiteOrRemote ? filters.onSiteOrRemote.map(o => onSiteOrRemoteFilter[o]) : undefined,
+      };
+
+      scraper.run([{
+        query,
+        options: {
+          locations,
+          filters: mappedFilters,
+          optimize: true,
+          limit: limit * 2,
+        },
+      }], {
+        paginationMax: 5,
+        delay: () => Math.floor(Math.random() * 1000) + 500,
+        userAgent: () => userAgents[Math.floor(Math.random() * userAgents.length)],
+      });
+    });
+  }
+
+  // Process scraping jobs
+  scrapeQueue.process(async (job) => {
+    const { query, locations, limit, filters, existingJobIds } = job.data;
+    const scraper = await scraperPool.acquire();
+    
+    try {
+      const results = await runScraper(scraper, query, locations, limit, filters, existingJobIds);
+      await scraperPool.release(scraper);
+      return results;
+    } catch (error) {
+      await scraperPool.release(scraper);
+      throw error;
+    }
+  });
+
   app.post('/scrape', async (req, res) => {
     const { query, locations, limit, options, existingJobIds } = req.body;
     const filters = options.filters;
 
     logger.info('Received API request:', { query, locations, limit, filters, existingJobIds: existingJobIds.length });
 
-    // Generate cache key
     const cacheKey = `${query}-${locations.join(',')}-${limit}-${JSON.stringify(filters)}-${existingJobIds.join(',')}`;
 
-    // Check Redis cache
     try {
       const cachedResults = await redisClient.get(cacheKey);
       if (cachedResults) {
         logger.info('Returning cached results from Redis');
         return res.json(JSON.parse(cachedResults));
       }
-    } catch (error) {
-      logger.error('Redis error:', error);
-    }
 
-    const maxRetries = 6;
-    let currentRetry = 0;
-    let results = [];
-    let responsesSent = false;
-
-    const runScraper = async () => {
-      await sleep(5000); // Wait for 5 seconds before starting the scraper
-
-      const scraper = new LinkedinScraper({
-        headless: true,
-        slowMo: 200,
-        args: ["--lang=en-GB", "--no-sandbox", "--disable-setuid-sandbox"],
+      const job = await scrapeQueue.add({
+        query,
+        locations,
+        limit,
+        filters,
+        existingJobIds
       });
 
-      const fetchedJobIds = new Set(existingJobIds);
-      let jobCount = 0;
+      const results = await job.finished();
 
-      scraper.on(events.scraper.data, async (data) => {
-        if (responsesSent || jobCount >= limit) return;
-        if (fetchedJobIds.has(data.jobId)) return;
+      const sortedResults = results.sort((a, b) => new Date(b.date) - new Date(a.date)).slice(0, limit);
 
-        jobCount++;
-        fetchedJobIds.add(data.jobId);
-
-        const jobData = {
-          jobId: data.jobId,
-          title: data.title,
-          company: data.company,
-          companyLink: data.companyLink,
-          companyImgLink: data.companyImgLink,
-          place: data.place,
-          date: data.date,
-          link: data.link,
-          seniorityLevel: data.seniorityLevel,
-          jobFunction: data.jobFunction,
-          employmentType: data.employmentType,
-          description: data.description,
-          descriptionHTML: data.descriptionHTML,
-        };
-
-        results.push(jobData);
-
-        logger.info(`Job ID: ${data.jobId}, Title: ${data.title}`);
-
-        if (results.length >= limit) {
-          await scraper.close();
-          await sendResponse();
-        }
-      });
-
-      scraper.on(events.scraper.error, (err) => {
-        logger.error('Scraper error:', err);
-      });
-
-      scraper.on(events.scraper.end, async () => {
-        logger.info('Scraping attempt completed');
-        if (!responsesSent) {
-          if (results.length === 0) {
-            logger.info('No results found. Retrying...');
-            await scraper.close();
-            await attemptScrape();
-          } else {
-            await sendResponse();
-          }
-        }
-      });
-
-      try {
-        const mappedFilters = {
-          relevance: relevanceFilter.RELEVANT,
-          time: timeFilter.ANY,
-          type: filters.type,
-          experience: filters.experience,
-          onSiteOrRemote: filters.onSiteOrRemote ? filters.onSiteOrRemote.map(o => onSiteOrRemoteFilter[o]) : undefined,
-        };
-
-        logger.info('Running scraper with options:', { query, locations, filters: mappedFilters, limit });
-
-        await sleep(5000);
-
-        await scraper.run([{
-          query,
-          options: {
-            locations,
-            filters: mappedFilters,
-            optimize: true,
-            limit: limit * 2, // Set a higher limit to ensure we get enough results
-          },
-        }], {
-          paginationMax: 5,
-          delay: () => Math.floor(Math.random() * 1000) + 500,
-          userAgent: () => userAgents[Math.floor(Math.random() * userAgents.length)],
-        });
-
-        if (results.length === 0) {
-          logger.info('No results found after scraping. Retrying...');
-          await scraper.close();
-          await attemptScrape();
-        } else {
-          await scraper.close();
-          if (!responsesSent) {
-            await sendResponse();
-          }
-        }
-      } catch (error) {
-        logger.error('Error during scraping:', error);
-        await scraper.close();
-        throw error;
-      }
-    };
-
-    const sendResponse = async () => {
-      if (responsesSent) return;
-      responsesSent = true;
-
-      results.sort((a, b) => new Date(b.date) - new Date(a.date));
-      results = results.slice(0, limit);
-
-      const applyLinkPromises = results.map(job => fetchApplyLink(job));
+      const applyLinkPromises = sortedResults.map(job => fetchApplyLink(job));
       const applyLinks = await Promise.all(applyLinkPromises);
 
-      results.forEach((job, index) => {
+      sortedResults.forEach((job, index) => {
         job.applyLink = applyLinks[index] || "";
       });
 
       logger.info('Scraping completed successfully');
 
-      // Cache the results in Redis
-      try {
-        await redisClient.set(cacheKey, JSON.stringify(results), 'EX', 3600); // 1 hour expiration
-      } catch (error) {
-        logger.error('Redis caching error:', error);
-      }
-
-      res.json(results);
-    };
-
-    const attemptScrape = async () => {
-      try {
-        await runScraper();
-      } catch (error) {
-        logger.error('Error during scraping:', error);
-        if (currentRetry < maxRetries && !responsesSent) {
-          currentRetry++;
-          logger.info(`Retrying scrape attempt ${currentRetry} of ${maxRetries}`);
-          await sleep(5000 * currentRetry);
-          await attemptScrape();
-        } else if (!responsesSent) {
-          logger.error('Max retries reached or error after response sent. Sending error response.');
-          res.status(500).json({ error: 'Failed to scrape after multiple attempts' });
-        }
-      }
-    };
-
-    attemptScrape();
+      await redisClient.set(cacheKey, JSON.stringify(sortedResults), 'EX', 3600);
+      res.json(sortedResults);
+    } catch (error) {
+      logger.error('Error during scraping:', error);
+      res.status(500).json({ error: 'An error occurred during scraping' });
+    }
   });
 
-  // Health check endpoint
   app.get('/health', (req, res) => {
     res.status(200).json({ status: 'OK' });
   });
 
-  // Global error handler
   app.use((err, req, res, next) => {
     logger.error('Unhandled error:', err);
     res.status(500).json({ error: 'An unexpected error occurred' });
   });
 
-  // Express-winston error logger
   app.use(expressWinston.errorLogger({
     winstonInstance: logger,
   }));
 
   app.listen(port, () => {
     logger.info(`Worker ${process.pid} is running on http://localhost:${port}`);
+  });
+
+  // Graceful shutdown
+  process.on('SIGTERM', async () => {
+    logger.info('SIGTERM signal received: closing HTTP server');
+    await scraperPool.drain();
+    await scraperPool.clear();
+    await scrapeQueue.close();
+    process.exit(0);
   });
 }
