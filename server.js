@@ -43,11 +43,11 @@ if (cluster.isMaster) {
   const app = express();
   const port = process.env.PORT || 3000;
 
-  // Redis client setup
+  // Hardcoded Redis configuration
   const redisClient = new Redis({
-    host: process.env.REDIS_HOST || 'redis-15623.c326.us-east-1-3.ec2.redns.redns.redis-cloud.com',
-    port: process.env.REDIS_PORT || 15623,
-    password: process.env.REDIS_PASSWORD || 'ro5b7WjPEwm2voU95vWz6T8pZPyRlErf',
+    host: 'redis-15623.c326.us-east-1-3.ec2.cloud.redns.com',
+    port: 15623,
+    password: 'ro5b7WjPEwm2voU95vWz6T8pZPyRlErf',
   });
 
   redisClient.on('error', (err) => console.log('Redis Client Error', err));
@@ -191,7 +191,7 @@ if (cluster.isMaster) {
         
         logger.warn('Scraper completed but no results were found. Retrying...');
       } catch (error) {
-        if (error.message.includes('Failed to load container selector')) {
+        if (error.message && error.message.includes('Failed to load container selector')) {
           logger.warn('Failed to load container selector. Retrying...');
         } else {
           logger.error('Unexpected error during scraping:', error);
